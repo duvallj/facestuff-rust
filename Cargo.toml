@@ -7,5 +7,7 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-opencv = {version = "0.46", features = ["contrib"]}
+opencv = {version = "0.46", features = ["contrib", "buildtime-bindgen"]}
 clap = "2.33"
+tetra = "0.5"
+winapi = {version = "0.3", features = ["processthreadsapi", "psapi", "winuser"]}
