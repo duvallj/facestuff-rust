@@ -2,12 +2,14 @@ use std::convert::TryInto;
 
 use winapi::{
     ctypes::*,
-    shared::{minwindef::*, ntdef::*, windef::*},
+    shared::{minwindef::*, windef::*},
     um::{
-        libloaderapi::GetModuleFileNameA,
         processthreadsapi::GetCurrentProcess,
         psapi::EnumProcessModules,
-        winuser::{CallNextHookEx, SetWindowsHookExA, UnhookWindowsHookEx, WH_KEYBOARD_LL},
+        winuser::{
+            CallNextHookEx, SetWindowsHookExA, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN,
+            WM_SYSKEYDOWN,
+        },
     },
 };
 
@@ -21,15 +23,12 @@ static mut GLOBAL_IH: Option<InputHandler> = None;
 fn get_main_module_handle() -> Option<HINSTANCE> {
     let module_handle_box: Box<[HMODULE; 1024]> = Box::new([std::ptr::null_mut(); 1024]);
     let module_handle_arr: *mut [HMODULE; 1024] = Box::into_raw(module_handle_box);
-
-    let filename_box: Box<[CHAR; MAX_PATH]> = Box::new([0; MAX_PATH]);
-    let filename_arr: *mut [CHAR; MAX_PATH] = Box::into_raw(filename_box);
-
     let mut cbs_needed: DWORD = 0;
 
     unsafe {
         let process_handle = GetCurrentProcess();
         if process_handle == std::ptr::null_mut() {
+            drop(Box::from_raw(module_handle_arr));
             return None;
         }
 
@@ -40,35 +39,21 @@ fn get_main_module_handle() -> Option<HINSTANCE> {
             &mut cbs_needed,
         );
 
-        if enum_proc_success > 0 {
-            let hmodule_size: u32 = std::mem::size_of::<HMODULE>().try_into().unwrap();
-            let num_modules = cbs_needed / hmodule_size;
-            for i in 0..num_modules {
-                println!("{}", i);
-                let read_filename_success = GetModuleFileNameA(
-                    (*module_handle_arr)[i as usize],
-                    filename_arr.cast::<CHAR>(),
-                    MAX_PATH.try_into().unwrap(),
-                );
-                if read_filename_success > 0 {
-                    let c_str: &std::ffi::CStr =
-                        std::ffi::CStr::from_ptr(filename_arr.cast::<CHAR>());
-                    let str_slice: &str = c_str.to_str().unwrap();
-                    println!("module name: {}", str_slice);
-                } else {
-                    println!("Failed reading module name");
-                }
+        let output = match enum_proc_success {
+            0 => {
+                println!("Failed enumerating modules");
+                None
             }
-        } else {
-            println!("Failed enumerating modules");
-        }
+            // The module at index 0 is always the main module, which will
+            // always exist if we succeeded
+            _ => Some((*module_handle_arr)[0]),
+        };
 
         // Copy HINSTANCE out of array before we are done
         drop(Box::from_raw(module_handle_arr));
-        drop(Box::from_raw(filename_arr));
-    }
 
-    None
+        return output;
+    }
 }
 
 pub fn init(key_handler: fn(i32) -> ()) -> () {
@@ -89,6 +74,8 @@ pub fn init(key_handler: fn(i32) -> ()) -> () {
                     println!("Error getting module handle for current process! Time to debug...");
                     return;
                 }
+
+                println!("Creating hook");
                 ih.hook_handle = SetWindowsHookExA(
                     WH_KEYBOARD_LL,
                     Some(hook_fn),
@@ -107,6 +94,7 @@ pub fn destroy() {
         match &GLOBAL_IH {
             None => (),
             Some(ih) => {
+                println!("Unhooking registered hook");
                 UnhookWindowsHookEx(ih.hook_handle);
                 GLOBAL_IH = None;
             }
@@ -118,7 +106,14 @@ pub fn destroy() {
 extern "system" fn hook_fn(code: c_int, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
     unsafe {
         if let Some(ih) = &GLOBAL_IH {
-            // TODO: call key_handler with the keycode that we get from *lParam
+            if code >= 0 {
+                match w_param as UINT {
+                    WM_KEYDOWN | WM_SYSKEYDOWN => {
+                        (ih.key_handler)(l_param as i32);
+                    }
+                    _ => (),
+                }
+            }
             return CallNextHookEx(ih.hook_handle, code, w_param, l_param);
         } else {
             return 0;
